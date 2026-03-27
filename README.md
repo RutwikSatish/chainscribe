@@ -106,6 +106,7 @@ pip install streamlit==1.35.0 requests==2.32.3
 # 5. Run
 streamlit run app.py
 App opens at http://localhost:8501
+Demo: https://chainscribeai.streamlit.app/
 
 Project Structure
 chainscribe/
