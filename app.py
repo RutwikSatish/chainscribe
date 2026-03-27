@@ -1,37 +1,26 @@
 """
-ChainScribe: AI Supply Chain Document Writer
-============================================
-Turns raw supply chain data into professional, ready-to-send documents.
+ChainScribe: AI Supply Chain Document Writer + Live Risk Feed
+=============================================================
+v2.0 — Added Live Supplier Risk Intelligence module
 
-Why this exists:
-  Research of 100+ supply chain analyst job descriptions shows that
-  88% of roles require "translating complex data into stakeholder communications."
-  Analysts spend ~110 minutes/day writing the same types of documents.
-  ChainScribe automates exactly that — using a free, local AI model.
+Modules:
+  - Document Writer: 6 AI-generated supply chain document types
+  - Live Risk Feed:  Real-time news → AI risk assessment per supplier
 
-6 document types:
-  1. Supplier Performance Review Letter
-  2. Executive KPI Summary
-  3. Supplier Escalation Email
-  4. Weekly Operations Briefing
-  5. Request for Quote (RFQ)
-  6. Cost Savings Report
-
-Stack:  Python · Streamlit · Ollama (llama3.2:3b) · Requests
+Stack:  Python · Streamlit · Ollama (llama3.2:3b) · feedparser · Requests
 Author: Rutwik Satish
 """
 
 import streamlit as st
 import requests
 from datetime import date
+import risk_feed
 
 # ─── SETTINGS ───────────────────────────────────────────────────────────────
 OLLAMA_URL    = "http://localhost:11434/api/chat"
 DEFAULT_MODEL = "llama3.2:3b"
 TODAY         = date.today().strftime("%B %d, %Y")
 
-# Estimated manual writing time per document type (minutes).
-# Source: industry surveys of supply chain professionals.
 TIME_ESTIMATES = {
     "supplier_letter":  45,
     "exec_kpi":         60,
@@ -41,7 +30,7 @@ TIME_ESTIMATES = {
     "savings_report":   60,
 }
 
-# ─── PAGE CONFIGURATION ──────────────────────────────────────────────────────
+# ─── PAGE CONFIG ─────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="ChainScribe AI",
     page_icon="📝",
@@ -49,7 +38,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Minimal CSS: styled output box + time-saved badge
 st.markdown("""
 <style>
 .doc-output {
@@ -79,21 +67,11 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ─── SESSION STATE ────────────────────────────────────────────────────────────
-# Streamlit re-runs the whole script on every interaction.
-# Session state keeps values across those re-runs.
-if "document"   not in st.session_state: st.session_state.document   = ""
-if "doc_id"     not in st.session_state: st.session_state.doc_id     = ""
+if "document" not in st.session_state: st.session_state.document = ""
+if "doc_id"   not in st.session_state: st.session_state.doc_id   = ""
 
 # ─── OLLAMA HELPER ────────────────────────────────────────────────────────────
-
 def ask_ollama(system: str, user: str, model: str = DEFAULT_MODEL) -> str:
-    """
-    Sends a two-message conversation to your local Ollama model.
-    - system: gives the AI its persona and rules
-    - user:   the actual document request with all the data
-    
-    Runs 100% on your Mac — no internet required, no API keys, no cost.
-    """
     try:
         resp = requests.post(
             OLLAMA_URL,
@@ -105,11 +83,10 @@ def ask_ollama(system: str, user: str, model: str = DEFAULT_MODEL) -> str:
                 ],
                 "stream": False,
             },
-            timeout=180,  # writing a full RFQ can take a minute
+            timeout=180,
         )
         resp.raise_for_status()
         return resp.json()["message"]["content"]
-
     except requests.exceptions.ConnectionError:
         return (
             "⚠️  CANNOT CONNECT TO OLLAMA\n\n"
@@ -124,7 +101,6 @@ def ask_ollama(system: str, user: str, model: str = DEFAULT_MODEL) -> str:
 
 
 def refine(original: str, instruction: str, model: str) -> str:
-    """Applies a user's refinement instruction to an already-generated document."""
     return ask_ollama(
         system=(
             "You are a professional supply chain document editor. "
@@ -140,13 +116,8 @@ def refine(original: str, instruction: str, model: str) -> str:
         model=model,
     )
 
-
 # ─── PROMPT LIBRARY ───────────────────────────────────────────────────────────
-# Each function receives a dict of form values and returns (system, user) prompts.
-# The quality of these prompts is what makes ChainScribe's output genuinely usable.
-
 def prompt_supplier_letter(v: dict) -> tuple:
-    # Select tone guidance based on the supplier relationship status
     tone_guide = {
         "Strategic Partner":  "warm but accountable — this is a valued long-term partner",
         "Preferred Supplier": "professional and direct — maintain relationship, drive improvement",
@@ -154,10 +125,9 @@ def prompt_supplier_letter(v: dict) -> tuple:
         "Under Review":       "firm and factual — this letter may be used in contract proceedings",
     }.get(v.get("relationship", "Standard Supplier"), "professional and direct")
 
-    # Determine pass/fail for each metric
     try:
-        otd_ok   = float(v.get("otd","0"))    >= float(v.get("otd_target","95"))
-        defect_ok= float(v.get("defect","0")) <= float(v.get("defect_target","2"))
+        otd_ok    = float(v.get("otd","0"))    >= float(v.get("otd_target","95"))
+        defect_ok = float(v.get("defect","0")) <= float(v.get("defect_target","2"))
     except ValueError:
         otd_ok = defect_ok = False
 
@@ -364,12 +334,11 @@ Professional procurement document. Number all sections. Use tables where noted."
 
 
 def prompt_savings(v: dict) -> tuple:
-    # Safe number parsing
     try:
-        base  = float(str(v.get("baseline","0")).replace(",","").replace("$",""))
-        new   = float(str(v.get("new_spend","0")).replace(",","").replace("$",""))
-        saved = base - new
-        pct   = (saved / base * 100) if base > 0 else 0
+        base   = float(str(v.get("baseline","0")).replace(",","").replace("$",""))
+        new    = float(str(v.get("new_spend","0")).replace(",","").replace("$",""))
+        saved  = base - new
+        pct    = (saved / base * 100) if base > 0 else 0
         months = float(v.get("months","12") or "12")
         annual = (saved / months * 12) if months > 0 else saved
     except ValueError:
@@ -417,7 +386,7 @@ Format: Professional finance document. All $ with commas. Label saving type clea
     return sys, usr
 
 
-# ─── MAP DOC IDs TO PROMPT FUNCTIONS ─────────────────────────────────────────
+# ─── PROMPT DISPATCH ──────────────────────────────────────────────────────────
 PROMPTS = {
     "supplier_letter":  prompt_supplier_letter,
     "exec_kpi":         prompt_exec_kpi,
@@ -442,6 +411,14 @@ with st.sidebar:
     st.caption("AI Document Writer for Supply Chain")
     st.divider()
 
+    st.markdown("### Mode")
+    app_mode = st.radio(
+        "",
+        ["📝 Document Writer", "📰 Live Risk Feed"],
+        label_visibility="collapsed",
+    )
+    st.divider()
+
     st.markdown("### What do you need to write?")
     choice = st.selectbox("", list(DISPLAY_TO_ID.keys()), label_visibility="collapsed")
     doc_id = DISPLAY_TO_ID[choice]
@@ -455,49 +432,50 @@ with st.sidebar:
         help="3b = best balance | 1b = fastest | 7b/8b = highest quality"
     )
 
-    st.divider()
-    est = TIME_ESTIMATES.get(doc_id, 45)
-    st.markdown("### ⏱ Time Saved")
-    st.markdown(f"Manual writing: **~{est} min**")
-    st.markdown(f"With ChainScribe: **~2 min**")
-    st.markdown(
-        f"<span class='saved-badge'>Saves ~{est-2} minutes</span>",
-        unsafe_allow_html=True
-    )
+    if app_mode == "📝 Document Writer":
+        st.divider()
+        est = TIME_ESTIMATES.get(doc_id, 45)
+        st.markdown("### ⏱ Time Saved")
+        st.markdown(f"Manual writing: **~{est} min**")
+        st.markdown(f"With ChainScribe: **~2 min**")
+        st.markdown(
+            f"<span class='saved-badge'>Saves ~{est-2} minutes</span>",
+            unsafe_allow_html=True
+        )
 
-# ─── MAIN LAYOUT: FORM (left) | OUTPUT (right) ───────────────────────────────
+# ─── LIVE RISK FEED MODE ──────────────────────────────────────────────────────
+if app_mode == "📰 Live Risk Feed":
+    risk_feed.render(model)
+    st.stop()
+
+# ─── DOCUMENT WRITER MODE ─────────────────────────────────────────────────────
 st.markdown(f"## {choice}")
 st.caption("Fill in the fields below, then click Generate.")
 st.divider()
 
 col_form, col_out = st.columns([1, 1], gap="large")
 
-# We initialize submitted here so it's always defined
 submitted = False
 inputs    = {}
 
-# ─── FORM: SUPPLIER PERFORMANCE REVIEW LETTER ────────────────────────────────
 with col_form:
     st.markdown("### 📋 Document Details")
 
+    # ── Supplier Performance Review Letter ───────────────────────────────────
     if doc_id == "supplier_letter":
         with st.form("f_supplier"):
             r1c1, r1c2 = st.columns(2)
             inputs["supplier_name"] = r1c1.text_input("Supplier Name *", placeholder="GlobalTech Parts Inc.")
             inputs["period"]        = r1c2.text_input("Review Period *",  placeholder="Q2 2025")
-
             r2c1, r2c2 = st.columns(2)
             inputs["otd"]        = r2c1.text_input("Actual On-Time Delivery %", value="87")
             inputs["otd_target"] = r2c2.text_input("OTD Target %",             value="95")
-
             r3c1, r3c2 = st.columns(2)
             inputs["defect"]        = r3c1.text_input("Actual Defect Rate %",       value="3.2")
             inputs["defect_target"] = r3c2.text_input("Max Acceptable Defect Rate", value="2.0")
-
             r4c1, r4c2 = st.columns(2)
             inputs["contract_value"] = r4c1.text_input("Annual Contract Value ($)", value="250,000")
             inputs["open_pos"]       = r4c2.text_input("Open Purchase Orders",      value="12")
-
             inputs["relationship"] = st.selectbox(
                 "Supplier Relationship Status",
                 ["Strategic Partner", "Preferred Supplier", "Standard Supplier", "Under Review"]
@@ -513,13 +491,12 @@ with col_form:
             )
             submitted = st.form_submit_button("✍️  Generate Letter", type="primary", use_container_width=True)
 
-    # ─── FORM: EXECUTIVE KPI SUMMARY ─────────────────────────────────────────
+    # ── Executive KPI Summary ────────────────────────────────────────────────
     elif doc_id == "exec_kpi":
         with st.form("f_kpi"):
             c1, c2 = st.columns(2)
             inputs["company"] = c1.text_input("Company / Division", placeholder="ACME Corp — North America Ops")
             inputs["period"]  = c2.text_input("Reporting Period",   placeholder="April 2025")
-
             inputs["kpi_data"] = st.text_area(
                 "KPI Data — paste your metrics here *",
                 placeholder=(
@@ -538,13 +515,12 @@ with col_form:
             )
             submitted = st.form_submit_button("✍️  Generate KPI Summary", type="primary", use_container_width=True)
 
-    # ─── FORM: ESCALATION EMAIL ───────────────────────────────────────────────
+    # ── Escalation Email ─────────────────────────────────────────────────────
     elif doc_id == "escalation_email":
         with st.form("f_escalation"):
             c1, c2 = st.columns(2)
             inputs["supplier_name"] = c1.text_input("Supplier Name *",     placeholder="FastFreight Co.")
             inputs["contact"]       = c2.text_input("Contact Name/Title",  placeholder="John Smith, Account Manager")
-
             inputs["issue_type"] = st.selectbox(
                 "Issue Type",
                 ["Late Delivery", "Quality / Defects", "Pricing Dispute",
@@ -553,7 +529,6 @@ with col_form:
             c3, c4 = st.columns(2)
             inputs["duration"] = c3.text_input("Duration of Issue", placeholder="3 weeks / since Jan 15")
             inputs["deadline"] = c4.text_input("Resolution Deadline", placeholder="March 31, 2025")
-
             inputs["impact"] = st.text_area(
                 "Business Impact *",
                 placeholder="3 customer orders delayed, ~$45,000 in pending shipments, production halted 2 days",
@@ -571,7 +546,7 @@ with col_form:
             )
             submitted = st.form_submit_button("✍️  Generate Escalation Email", type="primary", use_container_width=True)
 
-    # ─── FORM: WEEKLY BRIEFING ────────────────────────────────────────────────
+    # ── Weekly Briefing ──────────────────────────────────────────────────────
     elif doc_id == "weekly_brief":
         with st.form("f_weekly"):
             inputs["week"] = st.text_input("Week Of", placeholder="Week of March 24, 2025")
@@ -615,21 +590,18 @@ with col_form:
             )
             submitted = st.form_submit_button("✍️  Generate Weekly Briefing", type="primary", use_container_width=True)
 
-    # ─── FORM: RFQ ────────────────────────────────────────────────────────────
+    # ── RFQ ──────────────────────────────────────────────────────────────────
     elif doc_id == "rfq":
         with st.form("f_rfq"):
             c1, c2 = st.columns(2)
             inputs["company"]  = c1.text_input("Your Company Name",     placeholder="ACME Manufacturing Inc.")
             inputs["category"] = c2.text_input("Category / Item *",     placeholder="Industrial Steel Tubing Grade 316")
-
             c3, c4 = st.columns(2)
             inputs["quantity"] = c3.text_input("Quantity",               placeholder="50,000 units / 200 metric tons")
             inputs["location"] = c4.text_input("Delivery Location",      placeholder="Atlanta, GA 30301")
-
             c5, c6 = st.columns(2)
             inputs["delivery_date"]  = c5.text_input("Required Delivery Date",    placeholder="June 30, 2025")
             inputs["quote_deadline"] = c6.text_input("Quote Submission Deadline", placeholder="April 15, 2025")
-
             inputs["specs"] = st.text_area(
                 "Technical Specifications *",
                 placeholder=(
@@ -652,24 +624,21 @@ with col_form:
             )
             submitted = st.form_submit_button("✍️  Generate RFQ Document", type="primary", use_container_width=True)
 
-    # ─── FORM: COST SAVINGS REPORT ────────────────────────────────────────────
+    # ── Cost Savings Report ───────────────────────────────────────────────────
     elif doc_id == "savings_report":
         with st.form("f_savings"):
             c1, c2 = st.columns(2)
             inputs["period"]   = c1.text_input("Reporting Period",   placeholder="Q1 2025")
             inputs["category"] = c2.text_input("Spend Category",     placeholder="Indirect Procurement — MRO")
-
             c3, c4 = st.columns(2)
             inputs["baseline"]  = c3.text_input("Baseline Spend ($)", placeholder="1200000")
             inputs["new_spend"] = c4.text_input("Negotiated Spend ($)", placeholder="950000")
-
             c5, c6 = st.columns(2)
             inputs["saving_type"] = c5.selectbox(
                 "Saving Type",
                 ["Hard Saving (Cash Out)", "Cost Avoidance", "Soft Saving / Efficiency", "Rebate / Volume Discount"]
             )
             inputs["months"] = c6.text_input("Months Covered", value="12")
-
             inputs["strategy"] = st.text_area(
                 "Strategy Used *",
                 placeholder="Competitive RFQ to 6 suppliers. Consolidated from 3 to 1. 2-year contract with volume commitment.",
@@ -686,7 +655,7 @@ with col_form:
             )
             submitted = st.form_submit_button("✍️  Generate Savings Report", type="primary", use_container_width=True)
 
-    # ─── TRIGGER GENERATION ───────────────────────────────────────────────────
+    # ── Trigger generation ────────────────────────────────────────────────────
     if submitted:
         prompt_fn = PROMPTS.get(doc_id)
         if prompt_fn:
@@ -695,7 +664,7 @@ with col_form:
                 result = ask_ollama(sys_p, usr_p, model)
             st.session_state.document = result
             st.session_state.doc_id   = doc_id
-            st.rerun()  # refresh to show the output column immediately
+            st.rerun()
 
 # ─── OUTPUT COLUMN ────────────────────────────────────────────────────────────
 with col_out:
@@ -711,16 +680,11 @@ with col_out:
         st.markdown("- Output is ready to copy into email or download")
     else:
         doc = st.session_state.document
-
-        # Render the document in a professional-looking styled container
         st.markdown(
             f'<div class="doc-output">{doc}</div>',
             unsafe_allow_html=True
         )
-
         st.divider()
-
-        # Download button
         filename = f"ChainScribe_{doc_id}_{date.today().strftime('%Y%m%d')}.txt"
         st.download_button(
             label="📥 Download Document (.txt)",
@@ -730,11 +694,9 @@ with col_out:
             use_container_width=True
         )
 
-        # ── REFINEMENT SECTION ────────────────────────────────────────────────
         st.markdown("### ✏️ Refine This Document")
         st.caption("Tell ChainScribe what to change and it will rewrite the document.")
 
-        # Contextual placeholder for each doc type
         placeholders = {
             "supplier_letter":  "Make the tone firmer. Reference that the contract is under review.",
             "exec_kpi":         "Shorten to 200 words. Focus only on the two critical risks.",
@@ -761,7 +723,7 @@ with col_out:
 # ─── FOOTER ──────────────────────────────────────────────────────────────────
 st.divider()
 st.caption(
-    "ChainScribe · AI Supply Chain Document Writer · "
+    "ChainScribe · AI Supply Chain Document Writer + Live Risk Feed · "
     "Powered by Ollama (runs locally — zero cost, fully private) · "
     "Research source: IBM Institute for Business Value, 2024"
 )
