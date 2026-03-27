@@ -126,10 +126,13 @@ Planned improvements:
  Batch mode — generate the same document type for multiple suppliers at once
  Live supplier news feed — flag geopolitical/weather risk for named suppliers using free news APIs
  Multi-language output — generate documents in the supplier's language
+ 
 Author
-Rutwik Satish MS Engineering Management — Northeastern University (GPA: 3.67) Supply Chain · Procurement · AI Applications
+Rutwik Satish MS Engineering Management — Northeastern University 
+(GPA: 3.67) Supply Chain · Procurement · AI Applications
 
-LinkedIn · GitHub
+LinkedIn - https://www.linkedin.com/in/rutwiksatish
+GitHub - https://www.github.com/RutwikSatish
 
 License
 MIT License — free to use, modify, and distribute.
