@@ -1,5 +1,5 @@
 """
-SupplyScript — AI Supply Chain Document Writer
+ChainScribe — AI Supply Chain Document Writer
 ==============================================
 v3.0  Groq API · 7 document types · industry-validated prompts
 
@@ -39,7 +39,7 @@ TIME_ESTIMATES = {
 
 # ── PAGE CONFIG ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SupplyScript",
+    page_title="ChainScribe AI",
     page_icon="📝",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -564,7 +564,7 @@ SOURCES = {
 
 # ── SIDEBAR ───────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("# SupplyScript")
+    st.markdown("# ChainScribe")
     st.caption("AI Document Writer for Supply Chain")
     st.divider()
 
@@ -587,7 +587,7 @@ with st.sidebar:
         est = TIME_ESTIMATES.get(doc_id, 45)
         st.markdown("### Estimated Time Saved")
         st.markdown(f"Manual writing: ~{est} min")
-        st.markdown(f"With SupplyScript: ~2 min")
+        st.markdown(f"With ChainScribe: ~2 min")
         st.markdown(
             f"<span class='est-badge'>Saves ~{est-2} minutes (estimated)</span>",
             unsafe_allow_html=True
@@ -598,7 +598,7 @@ with st.sidebar:
 
 # ── LIVE RISK FEED ────────────────────────────────────────────────────────────
 if app_mode == "Live Risk Feed":
-    risk_feed.render()
+    risk_feed.render(GROQ_MODEL)
     st.stop()
 
 # ── DOCUMENT WRITER ───────────────────────────────────────────────────────────
@@ -882,7 +882,7 @@ with col_out:
     if not st.session_state.document:
         st.info("Fill in the form and click Generate to create your document.")
         st.markdown("")
-        st.markdown("**What SupplyScript generates:**")
+        st.markdown("**What ChainScribe generates:**")
         for name in DISPLAY_TO_ID:
             st.markdown(f"- {name}")
         st.markdown("")
@@ -901,7 +901,7 @@ with col_out:
             st.code(doc, language=None)
 
         # Download as .txt
-        filename = f"SupplyScript_{doc_id}_{date.today().strftime('%Y%m%d')}.txt"
+        filename = f"ChainScribe_{doc_id}_{date.today().strftime('%Y%m%d')}.txt"
         st.download_button(
             label="Download (.txt)",
             data=doc,
@@ -911,7 +911,7 @@ with col_out:
         )
 
         st.markdown("### Refine This Document")
-        st.caption("Describe what to change — SupplyScript rewrites the full document.")
+        st.caption("Describe what to change — ChainScribe rewrites the full document.")
 
         quick_refines = {
             "supplier_letter":  ["Make the tone firmer", "Shorten by 30%", "Add that we are evaluating alternative suppliers"],
@@ -950,7 +950,7 @@ with col_out:
 # ── FOOTER ─────────────────────────────────────────────────────────────────────
 st.divider()
 st.caption(
-    "SupplyScript · AI Supply Chain Document Writer · "
+    "ChainScribe · AI Supply Chain Document Writer · "
     "Standards: CIPS · ISM · AIAG · APICS · ISO 9001:2015 · "
-    "Built by Rutwik Satish · MS Engineering Management, Northeastern University."
+    "Built by Rutwik Satish · MS Engineering Management, Northeastern University"
 )
