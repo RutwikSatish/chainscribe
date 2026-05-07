@@ -1,18 +1,20 @@
 """
 ChainScribe — Live Risk Feed Module
 ====================================
-Fetches real-time supplier news and uses local Ollama AI to assess
+Fetches real-time supplier news and uses Groq AI to assess
 supply chain risk — geopolitical, financial, operational, and more.
 
 How it works:
   1. User types a supplier name
   2. We fetch recent headlines from Google News RSS (free, no API key)
-  3. Headlines are sent to your local Ollama model for risk analysis
+  3. Headlines are sent to Groq (Llama 3.3 70B) for risk analysis
   4. AI returns structured risk categories, score, and procurement actions
   5. User can generate a formal risk alert email in one click
 
-Cost:   $0 — Google News RSS is free, Ollama runs locally
-Privacy: 100% local — no supplier data leaves your machine
+Cost:    Google News RSS is free. Groq API has a generous free tier.
+Privacy: Supplier names and headlines are sent to Groq for analysis.
+         Do not use with confidential supplier data without reviewing
+         your organisation's data handling policy.
 """
 
 import streamlit as st
@@ -21,20 +23,51 @@ import requests
 import urllib.parse
 from datetime import datetime, date
 
-OLLAMA_URL = "http://localhost:11434/api/chat"
+GROQ_URL   = "https://api.groq.com/openai/v1/chat/completions"
 
 
-# ─── STEP 1: FETCH NEWS ──────────────────────────────────────────────────────
+# ── GROQ HELPER ───────────────────────────────────────────────────────────────
+
+def _ask_groq(system: str, user: str, model: str, max_tokens: int = 1000) -> str:
+    """Internal Groq call. API key read from Streamlit secrets."""
+    try:
+        api_key = st.secrets["GROQ_API_KEY"]
+    except (KeyError, FileNotFoundError):
+        return "ERROR: GROQ_API_KEY not found in Streamlit secrets."
+    try:
+        resp = requests.post(
+            GROQ_URL,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type":  "application/json",
+            },
+            json={
+                "model":       model,
+                "messages":    [
+                    {"role": "system", "content": system},
+                    {"role": "user",   "content": user},
+                ],
+                "max_tokens":  max_tokens,
+                "temperature": 0.3,
+            },
+            timeout=60,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"]
+    except requests.exceptions.HTTPError:
+        err = resp.json().get("error", {}).get("message", "Unknown error")
+        return f"ERROR: Groq API — {err}"
+    except Exception as e:
+        return f"ERROR: {e}"
+
+
+# ── STEP 1: FETCH NEWS ────────────────────────────────────────────────────────
 
 def fetch_news(supplier_name: str, max_results: int = 10) -> list:
     """
     Fetches recent news about a supplier using Google News RSS.
     No API key needed — Google News RSS is completely free.
-
-    We search for the supplier name + supply chain keywords to filter
-    out irrelevant results (e.g. stock price articles).
     """
-    # Build a targeted search query
     query = urllib.parse.quote(
         f'"{supplier_name}" '
         f'supply chain OR supplier OR procurement OR logistics OR factory OR shortage'
@@ -45,12 +78,10 @@ def fetch_news(supplier_name: str, max_results: int = 10) -> list:
         feed = feedparser.parse(url)
         articles = []
         for entry in feed.entries[:max_results]:
-            # Parse the published date into a readable string
             try:
                 pub_date = datetime(*entry.published_parsed[:6]).strftime("%b %d, %Y")
             except Exception:
                 pub_date = "Recent"
-
             articles.append({
                 "title":   entry.title,
                 "link":    entry.link,
@@ -59,20 +90,16 @@ def fetch_news(supplier_name: str, max_results: int = 10) -> list:
                 "source":  getattr(entry, "source", {}).get("title", "News"),
             })
         return articles
-
-    except Exception as e:
+    except Exception:
         return []
 
 
-# ─── STEP 2: ANALYSE WITH OLLAMA ─────────────────────────────────────────────
+# ── STEP 2: ANALYSE WITH GROQ ─────────────────────────────────────────────────
 
 def analyze_risk(supplier_name: str, articles: list, model: str) -> str:
     """
-    Passes the news headlines to your local Ollama model.
-    Returns a structured text response that we parse for display.
-
-    The prompt uses a strict format so we can reliably extract
-    risk levels, categories, and actions from the AI's response.
+    Passes the news headlines to Groq for risk analysis.
+    Returns a structured text response parsed separately for display.
     """
     headlines = "\n".join([
         f"[{a['date']}] {a['title']} — {a['source']}"
@@ -120,35 +147,16 @@ PROCUREMENT_ACTIONS:
 1. Maintain standard supplier monitoring cadence.
 WATCH_FOR: No immediate action required — continue routine monitoring."""
 
-    try:
-        resp = requests.post(
-            OLLAMA_URL,
-            json={
-                "model":    model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user",   "content": user},
-                ],
-                "stream": False,
-            },
-            timeout=90,
-        )
-        resp.raise_for_status()
-        return resp.json()["message"]["content"]
-
-    except requests.exceptions.ConnectionError:
-        return "CONNECTION_ERROR"
-    except Exception as e:
-        return f"ERROR: {e}"
+    result = _ask_groq(system, user, model, max_tokens=900)
+    if result.startswith("ERROR:"):
+        return result
+    return result
 
 
-# ─── STEP 3: PARSE AI RESPONSE ────────────────────────────────────────────────
+# ── STEP 3: PARSE RESPONSE ────────────────────────────────────────────────────
 
 def parse_response(text: str) -> dict:
-    """
-    Converts the AI's structured text response into a Python dict
-    so we can display each part separately in the UI.
-    """
+    """Converts the AI's structured text response into a Python dict."""
     result = {
         "overall_risk": "UNKNOWN",
         "risk_score":   0,
@@ -158,8 +166,9 @@ def parse_response(text: str) -> dict:
         "watch_for":    "",
     }
 
-    if not text or text in ("CONNECTION_ERROR",):
+    if not text or text.startswith("ERROR:"):
         result["overall_risk"] = "ERROR"
+        result["summary"]      = text or "Unknown error."
         return result
 
     section = None
@@ -186,10 +195,8 @@ def parse_response(text: str) -> dict:
             result["watch_for"] = line.split(":", 1)[1].strip()
             section = "watch"
         elif section == "summary":
-            # Multi-line summary
             result["summary"] += " " + line
         elif section == "risks" and line.startswith("-"):
-            # Parse "- CATEGORY: X | LEVEL: Y | DETAIL: Z"
             parts = {}
             for part in line[1:].split("|"):
                 part = part.strip()
@@ -208,30 +215,29 @@ def parse_response(text: str) -> dict:
     return result
 
 
-# ─── STEP 4: UI ───────────────────────────────────────────────────────────────
+# ── STEP 4: UI ────────────────────────────────────────────────────────────────
 
 def render(model: str):
     """
     Renders the full Live Risk Feed page.
-    Called from app.py when the user selects "Live Risk Feed" in the sidebar.
+    Called from app.py when the user selects Live Risk Feed in the sidebar.
     """
 
-    st.markdown("## 📰 Live Supplier Risk Feed")
+    st.markdown("## Live Supplier Risk Feed")
     st.caption(
-        "Searches real-time news and uses AI to assess supply chain risk — "
-        "no API key required, runs 100% locally"
+        "Searches real-time news via Google News RSS and uses Groq AI "
+        "to assess supply chain risk. Headlines are sent to Groq for analysis."
     )
 
-    # ── Search bar ──────────────────────────────────────────────────────────
+    # ── Search ───────────────────────────────────────────────────────────────
     col_s, col_b = st.columns([4, 1])
     supplier_input = col_s.text_input(
         "supplier",
         placeholder="Type a supplier name — e.g. TSMC, Maersk, FedEx, Samsung, BASF...",
         label_visibility="collapsed",
     )
-    search_clicked = col_b.button("🔍  Analyse", type="primary", use_container_width=True)
+    search_clicked = col_b.button("Analyse", type="primary", use_container_width=True)
 
-    # Quick-try examples
     st.caption("Quick examples:")
     ex_cols = st.columns(7)
     for i, ex in enumerate(["TSMC", "Maersk", "FedEx", "BASF", "Foxconn", "Vale", "Nippon Steel"]):
@@ -239,34 +245,34 @@ def render(model: str):
             supplier_input = ex
             search_clicked = True
 
-    # ── Landing state (no search yet) ──────────────────────────────────────
+    # ── Landing state ────────────────────────────────────────────────────────
     if not search_clicked or not supplier_input.strip():
         st.divider()
         c1, c2, c3 = st.columns(3)
         c1.markdown("**How it works**")
         c1.markdown(
-            "Searches Google News RSS for the supplier name + supply chain keywords. "
-            "Completely free — no API key, no signup, no cost."
+            "Searches Google News RSS for the supplier name plus supply chain keywords. "
+            "Free and requires no signup."
         )
         c2.markdown("**What the AI does**")
         c2.markdown(
-            "Your local Ollama model reads the headlines and identifies risks by category: "
+            "Groq reads the headlines and identifies risks by category: "
             "Geopolitical, Financial, Operational, Weather, Compliance, and Logistics."
         )
         c3.markdown("**What you get**")
         c3.markdown(
-            "A risk score (0–100), categorised risk breakdown, 3 specific procurement actions, "
+            "A risk score (0-100), categorised risk breakdown, 3 specific procurement actions, "
             "and a 30-day watchlist. One click to generate a formal risk alert email."
         )
         st.divider()
-        st.markdown(
-            "> *\"77% of supply chain executives say gen AI models successfully identify "
-            "geopolitical and climate risks, enabling proactive mitigation.\"*  \n"
-            "> — IBM Institute for Business Value, 2024"
+        st.info(
+            "Note: supplier names and news headlines are sent to Groq for analysis. "
+            "Review your organisation's data handling policy before using with "
+            "confidential supplier information."
         )
         return
 
-    # ── Run the analysis ────────────────────────────────────────────────────
+    # ── Run analysis ─────────────────────────────────────────────────────────
     supplier = supplier_input.strip()
 
     with st.spinner(f"Fetching live news for **{supplier}**..."):
@@ -275,33 +281,29 @@ def render(model: str):
     if not articles:
         st.warning(
             f"No recent news found for **{supplier}**. "
-            "Try a more widely-covered supplier, or check your internet connection."
+            "Try a more widely-covered supplier name, or check your internet connection."
         )
         return
 
-    with st.spinner(f"AI analysing {len(articles)} headlines..."):
+    with st.spinner(f"Groq analysing {len(articles)} headlines..."):
         raw = analyze_risk(supplier, articles, model)
-
-    if raw == "CONNECTION_ERROR":
-        st.error(
-            "Cannot connect to Ollama. "
-            "Make sure `ollama serve` is running in a separate terminal tab."
-        )
-        return
 
     data = parse_response(raw)
 
-    # ── Risk header card ────────────────────────────────────────────────────
+    if data["overall_risk"] == "ERROR":
+        st.error(f"Analysis failed: {data['summary']}")
+        return
+
+    # ── Risk header ──────────────────────────────────────────────────────────
     RISK_STYLE = {
-        "HIGH":       ("#fef2f2", "#dc2626", "🔴"),
-        "MEDIUM":     ("#fffbeb", "#d97706", "🟡"),
-        "LOW":        ("#f0fdf4", "#16a34a", "🟢"),
-        "MONITORING": ("#eff6ff", "#2563eb", "🔵"),
-        "UNKNOWN":    ("#f9fafb", "#6b7280", "⚪"),
-        "ERROR":      ("#fef2f2", "#dc2626", "⚠️"),
+        "HIGH":       ("#fef2f2", "#dc2626", "HIGH"),
+        "MEDIUM":     ("#fffbeb", "#d97706", "MEDIUM"),
+        "LOW":        ("#f0fdf4", "#16a34a", "LOW"),
+        "MONITORING": ("#eff6ff", "#2563eb", "MONITORING"),
+        "UNKNOWN":    ("#f9fafb", "#6b7280", "UNKNOWN"),
     }
     level = data["overall_risk"]
-    bg, fg, icon = RISK_STYLE.get(level, RISK_STYLE["UNKNOWN"])
+    bg, fg, lbl = RISK_STYLE.get(level, RISK_STYLE["UNKNOWN"])
     score = min(max(data["risk_score"], 0), 100)
 
     st.markdown(f"""
@@ -314,7 +316,7 @@ def render(model: str):
                 Supply Chain Risk Assessment
             </div>
             <div style="font-size:20px;font-weight:600;color:{fg};margin-bottom:6px">
-                {icon}&nbsp; {level} — {supplier}
+                {lbl} — {supplier}
             </div>
             <div style="font-size:13px;color:#444;line-height:1.6;max-width:580px">
                 {data['summary']}
@@ -327,12 +329,11 @@ def render(model: str):
     </div>
     """, unsafe_allow_html=True)
 
-    # ── Risks + Actions (side by side) ─────────────────────────────────────
+    # ── Risks + Actions ──────────────────────────────────────────────────────
     col_l, col_r = st.columns(2)
 
-    # Left: identified risks
     with col_l:
-        st.markdown("#### ⚠️ Identified Risks")
+        st.markdown("#### Identified Risks")
 
         CAT_COLOR = {
             "GEOPOLITICAL":     "#ef4444",
@@ -343,12 +344,12 @@ def render(model: str):
             "SUPPLY-LOGISTICS": "#06b6d4",
         }
         CAT_ICON = {
-            "GEOPOLITICAL":     "🌍",
-            "FINANCIAL":        "💸",
-            "OPERATIONAL":      "⚙️",
-            "WEATHER-NATURAL":  "🌪️",
-            "COMPLIANCE-LEGAL": "⚖️",
-            "SUPPLY-LOGISTICS": "📦",
+            "GEOPOLITICAL":     "Global",
+            "FINANCIAL":        "Financial",
+            "OPERATIONAL":      "Operational",
+            "WEATHER-NATURAL":  "Weather",
+            "COMPLIANCE-LEGAL": "Compliance",
+            "SUPPLY-LOGISTICS": "Logistics",
         }
         LVL_STYLE = {
             "HIGH":   ("#fef2f2", "#dc2626"),
@@ -362,7 +363,7 @@ def render(model: str):
                 lvl    = risk.get("LEVEL",    "MEDIUM").upper()
                 detail = risk.get("DETAIL",   "")
                 c      = CAT_COLOR.get(cat, "#888")
-                ico    = CAT_ICON.get(cat, "⚡")
+                ico    = CAT_ICON.get(cat, cat.replace("-", " ").title())
                 lb_bg, lb_fg = LVL_STYLE.get(lvl, ("#f3f4f6", "#666"))
                 label  = cat.replace("-", " ").title()
 
@@ -371,9 +372,8 @@ def render(model: str):
                             border-radius:8px;padding:10px 14px;margin-bottom:8px">
                     <div style="display:flex;align-items:center;
                                 justify-content:space-between;margin-bottom:4px">
-                        <span style="font-size:13px;font-weight:500;
-                                     color:var(--color-text-primary,#111)">
-                            {ico} {label}
+                        <span style="font-size:13px;font-weight:500;color:#111">
+                            {ico} — {label}
                         </span>
                         <span style="font-size:11px;font-weight:600;padding:2px 8px;
                                      border-radius:10px;
@@ -387,14 +387,13 @@ def render(model: str):
         else:
             st.success("No significant risks identified in current news.")
 
-    # Right: actions + watchlist
     with col_r:
-        st.markdown("#### ✅ Procurement Actions")
+        st.markdown("#### Procurement Actions")
 
         for i, action in enumerate(data["actions"], 1):
             st.markdown(f"""
-            <div style="border:0.5px solid var(--color-border-tertiary,#e5e7eb);
-                        border-radius:8px;padding:10px 14px;margin-bottom:8px;
+            <div style="border:0.5px solid #e5e7eb;border-radius:8px;
+                        padding:10px 14px;margin-bottom:8px;
                         display:flex;gap:10px;align-items:flex-start">
                 <span style="background:#f0fdf4;color:#16a34a;border-radius:50%;
                              width:22px;height:22px;min-width:22px;
@@ -410,7 +409,7 @@ def render(model: str):
                         border-radius:8px;padding:12px 14px;margin-top:6px">
                 <div style="font-size:11px;font-weight:600;color:#1d4ed8;
                             text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">
-                    📡 30-Day Watchlist
+                    30-Day Watchlist
                 </div>
                 <div style="font-size:12px;color:#1e40af;line-height:1.55">
                     {data['watch_for']}
@@ -418,10 +417,10 @@ def render(model: str):
             </div>
             """, unsafe_allow_html=True)
 
-    # ── Source articles ─────────────────────────────────────────────────────
+    # ── Source articles ──────────────────────────────────────────────────────
     st.divider()
-    st.markdown(f"#### 📰 Source Articles — {len(articles)} headlines analysed")
-    st.caption("These are the exact headlines the AI read. Click any to open the full article.")
+    st.markdown(f"#### Source Articles — {len(articles)} headlines analysed")
+    st.caption("These are the exact headlines Groq read. Click any to open the full article.")
 
     for a in articles:
         label = f"**{a['date']}** — {a['title'][:88]}{'...' if len(a['title'])>88 else ''}"
@@ -429,14 +428,14 @@ def render(model: str):
             st.markdown(f"**Source:** {a['source']}")
             if a["summary"]:
                 st.caption(a["summary"])
-            st.markdown(f"[Read full article ↗]({a['link']})")
+            st.markdown(f"[Read full article]({a['link']})")
 
-    # ── Generate risk alert email ───────────────────────────────────────────
+    # ── Generate risk alert email ────────────────────────────────────────────
     st.divider()
-    st.markdown("#### 📬 Generate Risk Alert Email")
+    st.markdown("#### Generate Risk Alert Email")
     st.caption("Turn this analysis into a formal email ready to send to your team or management.")
 
-    if st.button("✍️  Write Risk Alert Email", type="primary", use_container_width=True):
+    if st.button("Write Risk Alert Email", type="primary", use_container_width=True):
         risks_text   = "\n".join([
             f"- {r.get('CATEGORY','')} [{r.get('LEVEL','')}]: {r.get('DETAIL','')}"
             for r in data["top_risks"]
@@ -468,7 +467,7 @@ Subject line: [RISK ALERT] {supplier} — {data['overall_risk']} Risk Level — 
 Sections:
 1. Opening (1 sentence: purpose and risk level)
 2. Risk Overview paragraph (cite the score and summary)
-3. Risk Details (bullet points with severity badges in brackets)
+3. Risk Details (bullet points with severity in brackets)
 4. Required Actions (numbered, with [Owner] placeholders and specific deadlines)
 5. Monitoring Note (30-day watchlist item)
 6. Professional close
@@ -476,43 +475,33 @@ Sections:
 Style: Formal procurement language. Under 280 words. Every action has an owner and deadline."""
 
         with st.spinner("Writing risk alert email..."):
-            try:
-                resp = requests.post(
-                    OLLAMA_URL,
-                    json={
-                        "model":    model,
-                        "messages": [
-                            {
-                                "role":    "system",
-                                "content": (
-                                    "You are a senior procurement manager writing a formal "
-                                    "internal supplier risk alert. You are precise, factual, "
-                                    "and action-oriented."
-                                ),
-                            },
-                            {"role": "user", "content": email_prompt},
-                        ],
-                        "stream": False,
-                    },
-                    timeout=90,
-                )
-                resp.raise_for_status()
-                email_text = resp.json()["message"]["content"]
+            email_text = _ask_groq(
+                system=(
+                    "You are a senior procurement manager writing a formal "
+                    "internal supplier risk alert. You are precise, factual, "
+                    "and action-oriented."
+                ),
+                user=email_prompt,
+                model=model,
+                max_tokens=700,
+            )
 
-                st.markdown(
-                    f'<div style="background:#fefefe;border:0.5px solid #d4d4d0;'
-                    f'border-radius:8px;padding:22px 26px;font-family:Georgia,serif;'
-                    f'font-size:14px;line-height:1.9;white-space:pre-wrap;margin-top:12px">'
-                    f'{email_text}</div>',
-                    unsafe_allow_html=True,
-                )
-                st.download_button(
-                    "📥 Download Risk Alert (.txt)",
-                    email_text,
-                    file_name=f"risk_alert_{supplier.replace(' ','_')}_{date.today()}.txt",
-                    mime="text/plain",
-                    use_container_width=True,
-                )
-            except Exception as e:
-                st.error(f"Error generating email: {e}")
-
+        if email_text.startswith("ERROR:"):
+            st.error(email_text)
+        else:
+            st.markdown(
+                f'<div style="background:#fefefe;border:0.5px solid #d4d4d0;'
+                f'border-radius:8px;padding:22px 26px;font-family:Georgia,serif;'
+                f'font-size:14px;line-height:1.9;white-space:pre-wrap;margin-top:12px">'
+                f'{email_text}</div>',
+                unsafe_allow_html=True,
+            )
+            with st.expander("Copy text"):
+                st.code(email_text, language=None)
+            st.download_button(
+                "Download Risk Alert (.txt)",
+                email_text,
+                file_name=f"risk_alert_{supplier.replace(' ','_')}_{date.today()}.txt",
+                mime="text/plain",
+                use_container_width=True,
+            )
